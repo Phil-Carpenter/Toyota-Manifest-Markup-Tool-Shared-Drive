@@ -1,0 +1,250 @@
+import fitz  # PyMuPDF
+import os
+import time
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+import logging
+from collections import defaultdict
+import re
+
+# --- Configuration ---
+# IMPORTANT: These paths are now set to monitor network drives using UNC paths.
+# They are derived from your previous project's UNC base and your new folder names.
+INPUT_FOLDER = r'\\aact-fs01\PC\Manifest Auto Mark Tool\Manifest Input'
+OUTPUT_FOLDER = r'\\aact-fs01\PC\Manifest Auto Mark Tool\Manifest Output'
+
+# Your finely tuned coordinates for placing the "Skid X of Y" numbers
+# (x, y) coordinates for the bottom-left of the text.
+# Y-coordinate is measured from the bottom of the page (0,0 is bottom-left).
+# Increase Y to move text UP. Decrease X to move text LEFT.
+COORD_SKID_CURRENT_X = 36
+COORD_SKID_CURRENT_Y = 165
+
+COORD_SKID_TOTAL_X = 125
+COORD_SKID_TOTAL_Y = 165
+
+FONT_SIZE = 36
+FONT_NAME = "Helvetica-Bold" # Use the full PostScript name for robustness
+
+# --- Bounding Boxes for Text Extraction ---
+# These are crucial for reading the Dock Code and Order Number.
+# Coordinates are (x0, y0, x1, y1). fitz.Rect will normalize the coordinates
+# so that x0 <= x1 and y0 <= y1, regardless of input order.
+# These have been UPDATED based on your latest precise measurements using the Python tool.
+
+RECT_DOCK_CODE = fitz.Rect(202, 89, 329, 170)
+RECT_ORDER_NUMBER = fitz.Rect(18, 189, 328, 232)
+
+
+# --- Logging Setup ---
+# Changed level to DEBUG to get more detailed output, especially for extraction attempts
+logging.basicConfig(level=logging.DEBUG,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    handlers=[
+                        logging.FileHandler("pdf_labeler.log"), # Log to a file in the script's directory
+                        logging.StreamHandler()                 # Log to console
+                    ])
+
+# --- Helper Function for Text Extraction ---
+def extract_text_from_rect(page, rect, field_name="Unknown"):
+    """
+    Extracts text within a defined rectangle on a PDF page and applies basic cleaning.
+    For Order Numbers, it attempts to find a numeric string.
+    """
+    raw_text = page.get_text("text", clip=rect)
+    cleaned_text = raw_text.strip().replace('\n', '')
+    logging.debug(f"  Attempting to extract '{field_name}' from rect {rect}: Raw='{raw_text}', Cleaned='{cleaned_text}'")
+
+    if field_name == "Order Number":
+        # Use regex to find a sequence of digits, which is typical for order numbers
+        match = re.search(r'\d+', cleaned_text)
+        if match:
+            extracted_value = match.group(0)
+            logging.debug(f"  Regex found for Order Number: '{extracted_value}'")
+            return extracted_value
+        else:
+            logging.debug(f"  Order Number regex failed for cleaned text: '{cleaned_text}'")
+            return '' # Return empty if no digits found for order number
+    
+    return cleaned_text # For Dock Code, return cleaned text as is
+
+# --- PDF Processing Function ---
+def process_pdf(pdf_path):
+    """
+    Processes a single PDF file with multiple orders:
+    extracts order data, groups pages, applies "Skid X of Y" labels per group,
+    saves to output, and deletes original.
+    """
+    logging.info(f"Processing new PDF: {pdf_path}")
+    try:
+        doc = fitz.open(pdf_path)
+        all_pages_data = [] # To store (page_index, dock_code, order_number) for all pages
+
+        # Define output_pdf_path here, before any 'continue' or 'return' that might skip it
+        base_name = os.path.basename(pdf_path)
+        name_without_ext = os.path.splitext(base_name)[0]
+        output_pdf_path = os.path.join(OUTPUT_FOLDER, f"LABELED_{name_without_ext}.pdf")
+
+        # --- Pass 1: Extract Dock Code and Order Number for all pages ---
+        for i in range(doc.page_count):
+            page = doc.load_page(i)
+            
+            # Pass field_name to extract_text_from_rect for specific filtering
+            dock_code = extract_text_from_rect(page, RECT_DOCK_CODE, "Dock Code")
+            order_number = extract_text_from_rect(page, RECT_ORDER_NUMBER, "Order Number")
+
+            # Basic validation: ensure we got something meaningful
+            if not dock_code or len(dock_code) < 1: # Check if empty or too short
+                logging.warning(f"Page {i+1} in '{os.path.basename(pdf_path)}': Could not extract valid Dock Code ('{dock_code}'). Skipping page for grouping.")
+                continue # Skip to next page in the loop
+            if not order_number or len(order_number) < 5: # Check if empty or too short for an order number
+                logging.warning(f"Page {i+1} in '{os.path.basename(pdf_path)}': Could not extract valid Order Number ('{order_number}'). Skipping page for grouping.")
+                continue # Skip to next page in the loop
+            
+            all_pages_data.append({
+                'page_index': i,
+                'dock_code': dock_code,
+                'order_number': order_number
+            })
+            logging.debug(f"Page {i+1} successfully extracted: Dock='{dock_code}', Order='{order_number}'")
+
+        if not all_pages_data:
+            logging.warning(f"No valid pages found with Dock Code and Order Number in '{os.path.basename(pdf_path)}'. Skipping processing.")
+            doc.close()
+            # We don't save or delete anything if no pages were processed successfully
+            return # Exit the function here if no data
+
+        # --- Group pages by (Dock Code, Order Number) ---
+        grouped_pages = defaultdict(list) # Key: (dock_code, order_number), Value: list of page_indices
+        for page_data in all_pages_data:
+            key = (page_data['dock_code'], page_data['order_number'])
+            grouped_pages[key].append(page_data['page_index'])
+        
+        logging.info(f"Found {len(grouped_pages)} unique order groups.")
+        for group_key, indices in grouped_pages.items():
+            logging.info(f"  Group {group_key}: {len(indices)} pages (original indices: {sorted(indices)})")
+
+        # --- Pass 2: Apply numbering and create output PDF ---
+        output_doc = fitz.open() # Create a new, blank document to write the modified pages to
+
+        for i in range(doc.page_count): # Iterate through original page order
+            original_page = doc.load_page(i)
+            
+            # Find the group this page belongs to
+            current_page_data = next((item for item in all_pages_data if item['page_index'] == i), None)
+            
+            if not current_page_data:
+                logging.warning(f"Page {i+1} was not successfully identified for a group. Adding as is (no new numbers).")
+                out_page = output_doc.new_page(width=original_page.rect.width, height=original_page.rect.height)
+                out_page.show_pdf_page(original_page.rect, doc, i)
+                continue
+
+            group_key = (current_page_data['dock_code'], current_page_data['order_number'])
+            
+            # Get all original page indices for this group, sorted
+            indices_in_group = sorted(grouped_pages[group_key])
+            
+            # Calculate current_unit and total_units for this specific group
+            total_pages_in_group = len(indices_in_group)
+            total_units_in_group = total_pages_in_group // 2
+            # Handle groups with 1 page or odd page counts (e.g., 1 page = 1 unit)
+            if total_pages_in_group == 1:
+                 total_units_in_group = 1
+            elif total_pages_in_group % 2 != 0:
+                 logging.warning(f"Group {group_key} has an odd number of pages ({total_pages_in_group}). Calculating units based on integer division.")
+
+            # Find the sequential position of the current page within its group
+            position_in_group = indices_in_group.index(i)
+            current_unit = (position_in_group // 2) + 1
+
+            # Create new page for output and copy content
+            out_page = output_doc.new_page(width=original_page.rect.width, height=original_page.rect.height)
+            out_page.show_pdf_page(original_page.rect, doc, i)
+
+            # --- Place the current unit number ---
+            text_current_unit = str(current_unit)
+            out_page.insert_text(
+                (COORD_SKID_CURRENT_X, COORD_SKID_CURRENT_Y),
+                text_current_unit,
+                fontname=FONT_NAME,
+                fontsize=FONT_SIZE,
+                color=(0, 0, 0),
+                overlay=True
+            )
+
+            # --- Place the total units number ---
+            text_total_units = str(total_units_in_group)
+            out_page.insert_text(
+                (COORD_SKID_TOTAL_X, COORD_SKID_TOTAL_Y),
+                text_total_units,
+                fontname=FONT_NAME,
+                fontsize=FONT_SIZE,
+                color=(0, 0, 0),
+                overlay=True
+            )
+            logging.info(f"  Page {i+1} (Original Index): Group '{group_key}', Labeled as '{current_unit} of {total_units_in_group}'")
+
+        output_doc.save(output_pdf_path)
+        doc.close()
+        output_doc.close()
+
+        logging.info(f"Successfully created labeled PDF: {output_pdf_path}")
+
+        # Delete original file
+        os.remove(pdf_path)
+        logging.info(f"Deleted original file: {pdf_path}")
+
+    except fitz.FileNotFoundError:
+        logging.error(f"Error: PDF file not found at {pdf_path}. It might have been moved or deleted before processing could start.", exc_info=True)
+    except Exception as e:
+        logging.error(f"An unexpected error occurred while processing {os.path.basename(pdf_path)}: {e}", exc_info=True)
+
+
+# --- Watchdog Event Handler ---
+class PDFHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        if not event.is_directory and event.src_path.lower().endswith('.pdf'):
+            logging.info(f"Detected new PDF: {event.src_path}")
+            # Add a small delay to ensure the file is fully written before trying to open it.
+            # This is especially crucial for network drives.
+            time.sleep(1.5)
+            process_pdf(event.src_path)
+
+# --- Main Program Execution ---
+if __name__ == "__main__":
+    # Create input and output folders if they don't exist
+    # This will create them on the network drive if they don't exist and permissions allow.
+    os.makedirs(INPUT_FOLDER, exist_ok=True)
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+    
+    logging.info(f"\n--- Initial scan of existing files in: {INPUT_FOLDER} ---")
+    files_to_process_on_startup = []
+    for filename in os.listdir(INPUT_FOLDER):
+        if filename.lower().endswith('.pdf'):
+            file_path = os.path.join(INPUT_FOLDER, filename)
+            if os.path.isfile(file_path):
+                files_to_process_on_startup.append(file_path)
+    
+    if files_to_process_on_startup:
+        for file_path in files_to_process_on_startup:
+            process_pdf(file_path)
+    else:
+        logging.info("No PDF files found in the input folder for initial scan.")
+    logging.info("--- Initial scan complete. Starting real-time monitoring ---\n")
+
+    event_handler = PDFHandler()
+    observer = Observer()
+    observer.schedule(event_handler, INPUT_FOLDER, recursive=False) 
+
+    logging.info(f"Monitoring folder: {INPUT_FOLDER}")
+    logging.info(f"Output folder: {OUTPUT_FOLDER}")
+    logging.info("To stop the script, press Ctrl+C in this window.")
+
+    observer.start()
+    try:
+        while True:
+            time.sleep(5) # Keep the main thread alive
+    except KeyboardInterrupt:
+        observer.stop()
+        logging.info("Monitoring stopped by user.")
+    observer.join() # Wait for the observer thread to finish
