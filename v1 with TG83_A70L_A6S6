@@ -8,8 +8,7 @@ from collections import defaultdict
 import re
 
 # --- Configuration ---
-# IMPORTANT: These paths are now set to monitor network drives using UNC paths.
-# They are derived from your previous project's UNC base and your new folder names.
+# IMPORTANT: These paths are now set back to monitor NETWORK drives (UNC paths).
 INPUT_FOLDER = r'\\aact-fs01\PC\Manifest Auto Mark Tool\Manifest Input'
 OUTPUT_FOLDER = r'\\aact-fs01\PC\Manifest Auto Mark Tool\Manifest Output'
 
@@ -23,7 +22,7 @@ COORD_SKID_CURRENT_Y = 165
 COORD_SKID_TOTAL_X = 125
 COORD_SKID_TOTAL_Y = 165
 
-FONT_SIZE = 36
+FONT_SIZE = 36 # Base font size for Skid X of Y
 FONT_NAME = "Helvetica-Bold" # Use the full PostScript name for robustness
 
 # --- Bounding Boxes for Text Extraction ---
@@ -36,13 +35,27 @@ RECT_DOCK_CODE = fitz.Rect(202, 89, 329, 170)
 RECT_ORDER_NUMBER = fitz.Rect(18, 189, 328, 232)
 
 
+# --- Bounding Boxes for secondary search and marking ---
+RECT_TG83 = fitz.Rect(31, 503, 427, 639)
+
+# NEW: Rectangle for A70L / A6S6 search when Dock Code is A3
+# This is the new coordinate provided: x0=37, y0=502, x1=410, y1=626
+RECT_A3_PART_SEARCH = fitz.Rect(37, 502, 410, 626)
+
+# UPDATED: Mark '1' location
+# This is the new coordinate provided: x0=454, y0=521, x1=575, y1=628
+RECT_MARK_ONE = fitz.Rect(454, 521, 575, 628)
+
+# New font size for the '1' mark (original 36 * 1.25 = 45)
+FONT_SIZE_MARK_ONE = 45
+
 # --- Logging Setup ---
 # Changed level to DEBUG to get more detailed output, especially for extraction attempts
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     handlers=[
                         logging.FileHandler("pdf_labeler.log"), # Log to a file in the script's directory
-                        logging.StreamHandler()                 # Log to console
+                        logging.StreamHandler()                # Log to console
                     ])
 
 # --- Helper Function for Text Extraction ---
@@ -66,7 +79,7 @@ def extract_text_from_rect(page, rect, field_name="Unknown"):
             logging.debug(f"  Order Number regex failed for cleaned text: '{cleaned_text}'")
             return '' # Return empty if no digits found for order number
     
-    return cleaned_text # For Dock Code, return cleaned text as is
+    return cleaned_text # For Dock Code, and other general text, return cleaned text as is
 
 # --- PDF Processing Function ---
 def process_pdf(pdf_path):
@@ -184,6 +197,45 @@ def process_pdf(pdf_path):
             )
             logging.info(f"  Page {i+1} (Original Index): Group '{group_key}', Labeled as '{current_unit} of {total_units_in_group}'")
 
+            # --- Conditional marking for "1" based on Dock Code and specific text ---
+            should_mark_one = False
+            current_dock_code = current_page_data['dock_code']
+            current_order_number = current_page_data['order_number'] # Still available if needed for other checks
+
+            if current_dock_code == "T8":
+                logging.debug(f"  Page {i+1}: Dock Code is 'T8'. Initiating secondary search for 'TG83'.")
+                tg83_text = extract_text_from_rect(original_page, RECT_TG83, "TG83 Search Area")
+                if "TG83" in tg83_text: 
+                    logging.info(f"  Page {i+1}: Found 'TG83' in the specified area with Dock Code 'T8'.")
+                    should_mark_one = True
+                else:
+                    logging.debug(f"  Page {i+1}: 'T8' dock code found, but 'TG83' not found in specified area ('{tg83_text.strip()}').")
+            elif current_dock_code == "A3":
+                logging.debug(f"  Page {i+1}: Dock Code is 'A3'. Initiating secondary search for 'A70L' or 'A6S6' in dedicated area.")
+                # Use the new specific rectangle for A3 related part number search
+                a3_search_text = extract_text_from_rect(original_page, RECT_A3_PART_SEARCH, "A3 Part Number Search Area")
+                
+                if "A70L" in a3_search_text:
+                    logging.info(f"  Page {i+1}: Dock Code 'A3' found and 'A70L' found in search area ('{a3_search_text.strip()}').")
+                    should_mark_one = True
+                elif "A6S6" in a3_search_text:
+                    logging.info(f"  Page {i+1}: Dock Code 'A3' found and 'A6S6' found in search area ('{a3_search_text.strip()}').")
+                    should_mark_one = True
+                else:
+                    logging.debug(f"  Page {i+1}: Dock Code 'A3' found, but neither 'A70L' nor 'A6S6' found in specified area ('{a3_search_text.strip()}').")
+            
+            if should_mark_one:
+                logging.info(f"  Page {i+1}: Marking '1' due to fulfilled conditions.")
+                out_page.insert_textbox(
+                    RECT_MARK_ONE, # Uses the new, updated coordinates
+                    "1",
+                    fontname=FONT_NAME,
+                    fontsize=FONT_SIZE_MARK_ONE,
+                    color=(0, 0, 0),
+                    align=fitz.TEXT_ALIGN_CENTER,
+                    overlay=True
+                )
+
         output_doc.save(output_pdf_path)
         doc.close()
         output_doc.close()
@@ -213,7 +265,6 @@ class PDFHandler(FileSystemEventHandler):
 # --- Main Program Execution ---
 if __name__ == "__main__":
     # Create input and output folders if they don't exist
-    # This will create them on the network drive if they don't exist and permissions allow.
     os.makedirs(INPUT_FOLDER, exist_ok=True)
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     
@@ -234,7 +285,7 @@ if __name__ == "__main__":
 
     event_handler = PDFHandler()
     observer = Observer()
-    observer.schedule(event_handler, INPUT_FOLDER, recursive=False) 
+    observer.schedule(event_handler, INPUT_FOLDER, recursive=False)  
 
     logging.info(f"Monitoring folder: {INPUT_FOLDER}")
     logging.info(f"Output folder: {OUTPUT_FOLDER}")
