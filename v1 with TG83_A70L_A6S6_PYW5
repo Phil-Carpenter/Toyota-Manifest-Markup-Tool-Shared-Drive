@@ -38,16 +38,19 @@ RECT_ORDER_NUMBER = fitz.Rect(18, 189, 328, 232)
 # --- Bounding Boxes for secondary search and marking ---
 RECT_TG83 = fitz.Rect(31, 503, 427, 639)
 
-# NEW: Rectangle for A70L / A6S6 search when Dock Code is A3
-# This is the new coordinate provided: x0=37, y0=502, x1=410, y1=626
+# Rectangle for A70L / A6S6 search (and Z001)
 RECT_A3_PART_SEARCH = fitz.Rect(37, 502, 410, 626)
 
-# UPDATED: Mark '1' location
-# This is the new coordinate provided: x0=454, y0=521, x1=575, y1=628
-RECT_MARK_ONE = fitz.Rect(454, 521, 575, 628)
+# UPDATED: Rectangle for PYW5 search
+# This is the new coordinate provided: x0=33, y0=514, x1=429, y1=626
+RECT_PYW5_SEARCH = fitz.Rect(33, 514, 429, 626)
 
-# New font size for the '1' mark (original 36 * 1.25 = 45)
-FONT_SIZE_MARK_ONE = 45
+# UPDATED AGAIN: Mark '1' location
+# This is the new coordinate provided: x0=463, y0=528, x1=567, y1=620
+RECT_MARK_ONE = fitz.Rect(463, 528, 567, 620)
+
+# Font size for the '1' mark
+FONT_SIZE_MARK_ONE = 45 # (original 36 * 1.25 = 45)
 
 # --- Logging Setup ---
 # Changed level to DEBUG to get more detailed output, especially for extraction attempts
@@ -200,8 +203,8 @@ def process_pdf(pdf_path):
             # --- Conditional marking for "1" based on Dock Code and specific text ---
             should_mark_one = False
             current_dock_code = current_page_data['dock_code']
-            current_order_number = current_page_data['order_number'] # Still available if needed for other checks
 
+            # Option 1: Dock Code T8 with TG83
             if current_dock_code == "T8":
                 logging.debug(f"  Page {i+1}: Dock Code is 'T8'. Initiating secondary search for 'TG83'.")
                 tg83_text = extract_text_from_rect(original_page, RECT_TG83, "TG83 Search Area")
@@ -210,9 +213,9 @@ def process_pdf(pdf_path):
                     should_mark_one = True
                 else:
                     logging.debug(f"  Page {i+1}: 'T8' dock code found, but 'TG83' not found in specified area ('{tg83_text.strip()}').")
+            # Option 2: Dock Code A3 with A70L or A6S6
             elif current_dock_code == "A3":
                 logging.debug(f"  Page {i+1}: Dock Code is 'A3'. Initiating secondary search for 'A70L' or 'A6S6' in dedicated area.")
-                # Use the new specific rectangle for A3 related part number search
                 a3_search_text = extract_text_from_rect(original_page, RECT_A3_PART_SEARCH, "A3 Part Number Search Area")
                 
                 if "A70L" in a3_search_text:
@@ -223,6 +226,33 @@ def process_pdf(pdf_path):
                     should_mark_one = True
                 else:
                     logging.debug(f"  Page {i+1}: Dock Code 'A3' found, but neither 'A70L' nor 'A6S6' found in specified area ('{a3_search_text.strip()}').")
+            # Option 3: Dock Code Z1 with Z001
+            elif current_dock_code == "Z1":
+                logging.debug(f"  Page {i+1}: Dock Code is 'Z1'. Initiating secondary search for 'Z001' in dedicated area.")
+                z1_search_text = extract_text_from_rect(original_page, RECT_A3_PART_SEARCH, "Z1 Part Number Search Area")
+                
+                if "Z001" in z1_search_text:
+                    logging.info(f"  Page {i+1}: Dock Code 'Z1' found and 'Z001' found in search area ('{z1_search_text.strip()}').")
+                    should_mark_one = True
+                else:
+                    logging.debug(f"  Page {i+1}: Dock Code 'Z1' found, but 'Z001' not found in specified area ('{z1_search_text.strip()}').")
+            # Option 4: PYW5 by itself (checked if no other dock_code specific condition was met)
+            else: # This 'else' ensures it's checked if not T8, A3, or Z1
+                logging.debug(f"  Page {i+1}: Dock Code '{current_dock_code}'. Checking for 'PYW5' explicitly 'by itself'.")
+                # Get raw text from the PYW5 search area
+                raw_pyw5_text_region = original_page.get_text("text", clip=RECT_PYW5_SEARCH)
+                
+                # Process lines to check for "PYW5" exclusively
+                # Strip each line and filter out empty ones
+                lines = [line.strip() for line in raw_pyw5_text_region.split('\n') if line.strip()]
+                
+                # Condition for "PYW5 by itself": exactly one line and that line is "PYW5"
+                if len(lines) == 1 and lines[0] == "PYW5":
+                    logging.info(f"  Page {i+1}: Found 'PYW5' by itself in the specified area.")
+                    should_mark_one = True
+                else:
+                    logging.debug(f"  Page {i+1}: 'PYW5' not found by itself in specified area. Content: {lines}")
+            # --- End of NEW CONDITION ---
             
             if should_mark_one:
                 logging.info(f"  Page {i+1}: Marking '1' due to fulfilled conditions.")
