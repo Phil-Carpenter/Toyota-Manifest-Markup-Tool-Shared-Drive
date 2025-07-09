@@ -41,13 +41,12 @@ RECT_TG83 = fitz.Rect(31, 503, 427, 639)
 # Rectangle for A70L / A6S6 search (and Z001)
 RECT_A3_PART_SEARCH = fitz.Rect(37, 502, 410, 626)
 
-# UPDATED: Rectangle for PYW5 search
-# This is the new coordinate provided: x0=33, y0=514, x1=429, y1=626
-RECT_PYW5_SEARCH = fitz.Rect(33, 514, 429, 626)
+# NEW: Shared rectangle for PYW5, PLMN, PN4D, PNYX, PRU5 search
+# This is the coordinate provided: x0=21, y0=505, x1=438, y1=638
+RECT_OTHER_CODES_SEARCH = fitz.Rect(21, 505, 438, 638)
 
-# UPDATED AGAIN: Mark '1' location
-# This is the new coordinate provided: x0=463, y0=528, x1=567, y1=620
-RECT_MARK_ONE = fitz.Rect(463, 528, 567, 620)
+# Mark '1' location
+RECT_MARK_ONE = fitz.Rect(463, 528, 567, 620) # Latest coordinates provided
 
 # Font size for the '1' mark
 FONT_SIZE_MARK_ONE = 45 # (original 36 * 1.25 = 45)
@@ -236,23 +235,22 @@ def process_pdf(pdf_path):
                     should_mark_one = True
                 else:
                     logging.debug(f"  Page {i+1}: Dock Code 'Z1' found, but 'Z001' not found in specified area ('{z1_search_text.strip()}').")
-            # Option 4: PYW5 by itself (checked if no other dock_code specific condition was met)
-            else: # This 'else' ensures it's checked if not T8, A3, or Z1
-                logging.debug(f"  Page {i+1}: Dock Code '{current_dock_code}'. Checking for 'PYW5' explicitly 'by itself'.")
-                # Get raw text from the PYW5 search area
-                raw_pyw5_text_region = original_page.get_text("text", clip=RECT_PYW5_SEARCH)
+            # Option 4: PYW5, PLMN, PN4D, PNYX, PRU5 by themselves (checked if no dock_code specific condition was met)
+            else: 
+                target_standalone_codes = ["PYW5", "PLMN", "PN4D", "PNYX", "PRU5"]
+                logging.debug(f"  Page {i+1}: Dock Code '{current_dock_code}'. Checking for standalone codes {target_standalone_codes}.")
                 
-                # Process lines to check for "PYW5" exclusively
-                # Strip each line and filter out empty ones
-                lines = [line.strip() for line in raw_pyw5_text_region.split('\n') if line.strip()]
+                # Get raw text from the shared search area for these codes
+                raw_other_codes_text_region = original_page.get_text("text", clip=RECT_OTHER_CODES_SEARCH)
                 
-                # Condition for "PYW5 by itself": exactly one line and that line is "PYW5"
-                if len(lines) == 1 and lines[0] == "PYW5":
-                    logging.info(f"  Page {i+1}: Found 'PYW5' by itself in the specified area.")
+                # Process lines to check if exactly one line matches one of the target codes
+                lines = [line.strip() for line in raw_other_codes_text_region.split('\n') if line.strip()]
+                
+                if len(lines) == 1 and lines[0] in target_standalone_codes:
+                    logging.info(f"  Page {i+1}: Found '{lines[0]}' by itself in the specified area.")
                     should_mark_one = True
                 else:
-                    logging.debug(f"  Page {i+1}: 'PYW5' not found by itself in specified area. Content: {lines}")
-            # --- End of NEW CONDITION ---
+                    logging.debug(f"  Page {i+1}: No desired standalone code found in specified area. Content: {lines}")
             
             if should_mark_one:
                 logging.info(f"  Page {i+1}: Marking '1' due to fulfilled conditions.")
